@@ -3,15 +3,16 @@ import os
 import logging
 from dotenv import load_dotenv
 import pandas as pd
+import streamlit as st
 
 load_dotenv()
 
 class DatabaseManager:
     def __init__(self):
-        self.server = os.getenv("DB_SERVER") 
-        self.database = os.getenv("DB_NAME")   
-        self.username = os.getenv("DB_USERNAME") 
-        self.password = os.getenv("DB_PASSWORD")  
+        self.server = st.secrets["DB"]["SERVER"]
+        self.database = st.secrets["DB"]["NAME"]
+        self.username = st.secrets["DB"]["USERNAME"]
+        self.password = st.secrets["DB"]["PASSWORD"]
         self.conn = None
         self.cursor = None
 
