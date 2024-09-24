@@ -88,7 +88,6 @@ python-dateutil==2.9.0.post0
 python-dotenv==1.0.1
 pytz==2024.1
 pytz-deprecation-shim==0.1.0.post0
-pywin32==306
 queuelib==1.7.0
 referencing==0.35.1
 requests==2.32.3
