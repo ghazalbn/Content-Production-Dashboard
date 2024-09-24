@@ -19,6 +19,7 @@ class DatabaseManager:
     def connect(self):
         """Establish a connection to the SQL Server database."""
         try:
+            logging.warning(self.server)
             self.conn = pyodbc.connect(
                 f"DRIVER={{ODBC Driver 17 for SQL Server}};"
                 f"SERVER={self.server};"
