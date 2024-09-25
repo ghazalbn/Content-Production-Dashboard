@@ -2,6 +2,15 @@ from gpt_request import TagGeneration, Translation, ArticleGeneration, ImageGene
 from fpdf import FPDF
 import os
 from io import BytesIO
+from dotenv import load_dotenv
+
+load_dotenv()
+
+API_KEY = os.getenv("OPENAI_API_KEY")
+MODEL = os.getenv("OPENAI_MODEL")
+
+# API_KEY = st.secrets.get("OPENAI_API_KEY")
+# MODEL = st.secrets.get("OPENAI_MODEL")
 
 # Function to save the generated article to a PDF file with Persian text support
 def save_article_to_pdf(article_text, filename="generated_article.pdf"):
@@ -34,20 +43,20 @@ def save_article_to_pdf(article_text, filename="generated_article.pdf"):
     return pdf_output
 
 def generate_tags_for_dashboard(content, existing_tags):
-    tag_generator = TagGeneration()
+    tag_generator = TagGeneration(MODEL, API_KEY)
     return tag_generator.process_item(content, existing_tags)
 
 def translate_for_dashboard(content, src_lang='en', dest_lang='fa', use_gpt=False):
-    translator = Translation()
+    translator = Translation(MODEL, API_KEY)
     if use_gpt:
         return translator.gpt_translate(content, src_lang, dest_lang)
     else:
         return translator.googletrans_translate(content, src_lang, dest_lang)
 
 def generate_article_for_dashboard(title, source, url, date, news_content, matched_keywords=None):
-    article_generator = ArticleGeneration()
+    article_generator = ArticleGeneration(MODEL, API_KEY)
     return article_generator.gpt_generate_article(title, source, url, date, news_content, matched_keywords)
 
 def generate_images_for_dashboard(prompt, num_images=1):
-    image_generator = ImageGeneration()
+    image_generator = ImageGeneration(api_key=API_KEY)
     return image_generator.gpt_generate_images(prompt, num_images=num_images)

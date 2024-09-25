@@ -389,7 +389,7 @@ def news_details_page():
         st.write("خلاصه ای برای این مقاله یافت نشد.")
     
     st.markdown("### مقاله")
-    if st.button("تولید مقاله از این خبر"):
+    if st.button("📝 تولید مقاله از این خبر"):
         generated_article = generate_article_for_dashboard(
             title_api, 
             selected_news['source'], 
@@ -400,15 +400,8 @@ def news_details_page():
         )
 
         if generated_article and generated_article != "No Article":
-            pdf_content = save_article_to_pdf(generated_article)
-
-            st.download_button(
-                label="دانلود مقاله به صورت PDF",
-                data=pdf_content,
-                file_name="generated_article.pdf",
-                mime="application/pdf"
-            )
-
+            with st.expander("🔍 مشاهده مقاله تولید شده (برای بستن کلیک کنید)"):
+                st.write(generated_article)
             st.success("مقاله با موفقیت تولید و ذخیره شد.")
         else:
             st.error("خطا در تولید مقاله")
