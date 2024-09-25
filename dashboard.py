@@ -6,7 +6,7 @@ import tldextract
 from database import DatabaseManager
 from bs4 import BeautifulSoup
 import re
-from gpt_request import *
+from API_calls import *
 
 # Set page config only once at the start of the script
 st.set_page_config(
@@ -324,6 +324,8 @@ def news_details_page():
     summary = selected_news['summary_persian'] if selected_news['summary_persian'] and language == "فارسی" else selected_news['summary']
     content = selected_news['content'] if selected_news['content'] or language == "English" else selected_news['content_persian']
     matched_keywords = selected_news.get('matched_keywords', [])
+    title_api = selected_news['title_persian'] if selected_news['title'] else selected_news['title_persian']
+    summary_api = selected_news['summary'] if selected_news['summary'] else selected_news['summary_persian']
 
     st.title(title)
     st.write(f"**تاریخ**: {selected_news['date']}")
@@ -359,7 +361,7 @@ def news_details_page():
         # Step 2: Translation buttons
         if st.button("ترجمه با گوگل"):
             # Perform translation using Googletrans
-            translation = googletrans_translate(content, 'en', 'fa')
+            translation = translate_for_dashboard(content, 'en', 'fa', False)
             if translation:
                 db_manager.insert_translation(news_id, translation)
                 st.success("ترجمه با موفقیت انجام شد.")
@@ -368,7 +370,7 @@ def news_details_page():
 
         elif st.button("ترجمه با GPT"):
             # Perform translation using GPT
-            translation = gpt_translate(content, 'en', 'fa')
+            translation = translate_for_dashboard(content, 'en', 'fa', True)
             if translation:
                 db_manager.insert_translation(news_id, translation)
                 st.success("ترجمه با موفقیت انجام شد.")
@@ -386,20 +388,27 @@ def news_details_page():
     else:
         st.write("خلاصه ای برای این مقاله یافت نشد.")
     
-    # Button for generating article from the news
+    st.markdown("### مقاله")
     if st.button("تولید مقاله از این خبر"):
-        # Call GPT to generate an article
-        generated_article = gpt_generate_article(
-            selected_news['title'], 
+        generated_article = generate_article_for_dashboard(
+            title_api, 
             selected_news['source'], 
             selected_news['url'], 
             selected_news['date'], 
-            selected_news['content'],
+            content,
             matched_keywords=matched_keywords
         )
-        if generated_article != "No Article":
-            st.write(generated_article)
-            # db_manager.store_article(news_id, generated_article)
+
+        if generated_article and generated_article != "No Article":
+            pdf_content = save_article_to_pdf(generated_article)
+
+            st.download_button(
+                label="دانلود مقاله به صورت PDF",
+                data=pdf_content,
+                file_name="generated_article.pdf",
+                mime="application/pdf"
+            )
+
             st.success("مقاله با موفقیت تولید و ذخیره شد.")
         else:
             st.error("خطا در تولید مقاله")
@@ -419,7 +428,8 @@ def news_details_page():
     # Button for generating images
     if st.button("تولید تصویر"):
         # Call GPT to generate image URLs
-        generated_images = gpt_generate_images(prompt=summary)
+        img_prompt = summary_api if summary_api else title_api if title_api else content
+        generated_images = generate_images_for_dashboard(prompt=img_prompt)
         if generated_images:
             db_manager.insert_images(news_id, generated_images)
             # for image_url in generated_images:
@@ -436,16 +446,16 @@ def news_details_page():
         st.write(' ,'.join(tags_df['tag']))
     else:
         st.write("برچسب‌ها در حال حاضر موجود نیستند.")
-    
-    if st.button("تولید تگ"):
+    if len(tags_df) < 7:
+        if st.button("تولید تگ"):
 
-        generated_tags = gpt_generate_tags(content, selected_news.get('tags', []))
-        if generated_tags:
-            db_manager.insert_content_tags(news_id, generated_tags)
-            st.success("تولید تگ با موفقیت انجام شد.")
-            st.experimental_rerun()
-        else:
-            st.error("مشکلی در ارتباط با API رخ داد.")
+            generated_tags = generate_tags_for_dashboard(content, selected_news.get('tags', []))
+            if generated_tags:
+                db_manager.insert_content_tags(news_id, generated_tags)
+                st.success("تولید تگ با موفقیت انجام شد.")
+                st.experimental_rerun()
+            else:
+                st.error("مشکلی در ارتباط با API رخ داد.")
 
 
 

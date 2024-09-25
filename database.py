@@ -9,10 +9,10 @@ load_dotenv()
 
 class DatabaseManager:
     def __init__(self):
-        self.server = st.secrets["DB_SERVER"]
-        self.database = st.secrets["DB_NAME"]
-        self.username = st.secrets["DB_USERNAME"]
-        self.password = st.secrets["DB_PASSWORD"]
+        self.server = os.getenv("DB_SERVER")
+        self.database = os.getenv("DB_NAME")
+        self.username = os.getenv("DB_USERNAME")
+        self.password = os.getenv("DB_PASSWORD")
         self.conn = None
         self.cursor = None
 
@@ -25,7 +25,8 @@ class DatabaseManager:
                 f"SERVER={self.server};"
                 f"DATABASE={self.database};"
                 f"UID={self.username};"
-                f"PWD={self.password}"
+                f"PWD={self.password};"
+                f"Timeout=30;"
             )
             self.cursor = self.conn.cursor()
             logging.warning("Database connection established.")
