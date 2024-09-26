@@ -1,28 +1,26 @@
 from googletrans import Translator
 import logging
-from dotenv import load_dotenv
-import os
 import requests
 import json
 
-load_dotenv()
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
-API_KEY = os.getenv("OPENAI_API_KEY")
-MODEL = os.getenv("OPENAI_MODEL")
-
 
 class TagGeneration:
+    
+    def __init__(self, model, api_key):
+        self.model = model
+        self.api_key = api_key
 
-    def ask_gpt(self, default, question, model=MODEL):
+    def ask_gpt(self, default, question):
         logging.debug("Sending request to OpenAI for tag generation")
 
         url = "https://api.openai.com/v1/chat/completions"
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {API_KEY}"
+            "Authorization": f"Bearer {self.api_key}"
         }
         data = {
-            "model": model,
+            "model": self.model,
             "messages": [{"role": "user", "content": question}],
             "max_tokens": 1000
         }
@@ -50,7 +48,6 @@ class TagGeneration:
             return default
 
     def generate_tags(self, content, existing_tags):
-        """Generate new tags for content using the OpenAI API."""
         num_existing_tags = len(existing_tags) if existing_tags else 0
         num_tags_to_generate = max(7 - num_existing_tags, 0)
 
@@ -61,13 +58,10 @@ class TagGeneration:
                    f"Return the tags in a comma-separated list:\n\nContent: {content}\n\n" \
                    f"Existing tags: {', '.join(existing_tags)}"
 
-        # Call ask_gpt to generate tags
-        generated_tags_response = self.ask_gpt(default="", question=question, model=MODEL)
+        generated_tags_response = self.ask_gpt(default="", question=question)
 
-        # Split the generated response into individual tags
         generated_tags = [tag.strip() for tag in generated_tags_response.split(',') if tag.strip()]
 
-        # Return combined existing and generated tags
         return existing_tags + generated_tags[:num_tags_to_generate]
 
     def process_item(self, content, existing_tags):
@@ -79,23 +73,27 @@ class TagGeneration:
 
 class Translation:
     
+    def __init__(self, model, api_key):
+        self.model = model
+        self.api_key = api_key
+
     @staticmethod
     def googletrans_translate(content, src_lang, dest_lang):
         translator = Translator()
         return translator.translate(content, src=src_lang, dest=dest_lang).text
 
-    def gpt_translate(self, content, src_lang, dest_lang, model=MODEL):
+    def gpt_translate(self, content, src_lang, dest_lang):
         logging.debug(f"Translating text from {src_lang} to {dest_lang}")
 
         url = "https://api.openai.com/v1/chat/completions"
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {API_KEY}"
+            "Authorization": f"Bearer {self.api_key}"
         }
         prompt = f"Translate this news from {src_lang} to {dest_lang}, and return only the translated content. Keep the html structure: {content}"
 
         data = {
-            "model": model,
+            "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": 4000,
         }
@@ -122,15 +120,18 @@ class Translation:
 
 
 class ArticleGeneration:
+    
+    def __init__(self, model, api_key):
+        self.model = model
+        self.api_key = api_key
 
-    def gpt_generate_article(self, title, source, url, date, news_content, matched_keywords=None, model=MODEL):
-        # Prepare the keywords string for the prompt
+    def gpt_generate_article(self, title, source, url, date, news_content, matched_keywords=None):
         keywords_str = ', '.join(matched_keywords) if matched_keywords else ""
 
         question = f"""
         Write an analytical article in Persian for Tokeniko.com based on the following news content. 
         Provide insights from an economist's perspective and include the following keywords: {keywords_str} (if applicable). 
-        The article should be at least 1300 words. Generate an attractive and concise title for it. It can contains images and tables if needed.
+        The article should be at least 1300 words. Generate an attractive and concise title for it. It can contain images and tables if needed.
 
         - **Title**: {title}
         - **Source**: {source}
@@ -148,12 +149,12 @@ class ArticleGeneration:
         url = "https://api.openai.com/v1/chat/completions"
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {API_KEY}"
+            "Authorization": f"Bearer {self.api_key}"
         }
         data = {
-            "model": model,
+            "model": self.model,
             "messages": [{"role": "user", "content": question}],
-            "max_tokens": 3000  # Adjust max_tokens based on word count target (~1300 words)
+            "max_tokens": 3000
         }
         logging.debug("Sending request to OpenAI with data: %s", data)
 
@@ -171,36 +172,38 @@ class ArticleGeneration:
 
         except requests.exceptions.RequestException as e:
             logging.error(f"RequestException: {e}")
-            return f"RequestException: {e}"
+            return self.api_key
         except KeyError as e:
             logging.error(f"KeyError: {e}")
             return f"KeyError: {e}"
 
 
 class ImageGeneration:
+    
+    def __init__(self, api_key, model="dall-e-3"):
+        self.model = model
+        self.api_key = api_key
 
-    def gpt_generate_images(self, prompt, model="dall-e-3", num_images=1):
+    def gpt_generate_images(self, prompt, num_images=1):
         logging.debug("Sending request to OpenAI for image generation")
 
         url = "https://api.openai.com/v1/images/generations"
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {API_KEY}"
+            "Authorization": f"Bearer {self.api_key}"
         }
 
-        # Ensure the prompt is valid
         if not prompt or not isinstance(prompt, str):
             logging.error("Invalid prompt provided for image generation.")
             return []
 
         image_urls = []
         for _ in range(num_images):
-            # Update prompt to instruct the model not to include text in the images
-            image_prompt = f"generate a natural image related to this content news for a gold production website. content summary:{prompt}. \
-            Please ensure that no text is included in the image. The theme of the photo should be yellow and purple and its quality should be 1%."
+            image_prompt = f"generate a natural image related to this content news. content summary:{prompt}. \
+            Please ensure that no text is included in the image. The theme of the image should be yellow and purple and its quality should be 1%."
 
             data = {
-                "model": model,
+                "model": self.model,
                 "prompt": image_prompt,
                 "size": "1024x1024"
             }
@@ -212,7 +215,6 @@ class ImageGeneration:
                 response_json = response.json()
                 logging.debug("Received response from OpenAI: %s", json.dumps(response_json, indent=2))
 
-                # Validate the structure of the response
                 if 'data' in response_json and len(response_json['data']) > 0:
                     image_url = response_json['data'][0].get('url')
                     if image_url:
@@ -231,6 +233,7 @@ class ImageGeneration:
 
         logging.debug("Images generated: %s", image_urls)
         return image_urls
+
 
 
 

@@ -7,6 +7,7 @@ from database import DatabaseManager
 from bs4 import BeautifulSoup
 import re
 from API_calls import *
+import io
 
 # Set page config only once at the start of the script
 st.set_page_config(
@@ -389,7 +390,7 @@ def news_details_page():
         st.write("خلاصه ای برای این مقاله یافت نشد.")
     
     st.markdown("### مقاله")
-    if st.button("تولید مقاله از این خبر"):
+    if st.button("📝 تولید مقاله از این خبر"):
         generated_article = generate_article_for_dashboard(
             title_api, 
             selected_news['source'], 
@@ -400,15 +401,8 @@ def news_details_page():
         )
 
         if generated_article and generated_article != "No Article":
-            pdf_content = save_article_to_pdf(generated_article)
-
-            st.download_button(
-                label="دانلود مقاله به صورت PDF",
-                data=pdf_content,
-                file_name="generated_article.pdf",
-                mime="application/pdf"
-            )
-
+            with st.expander("🔍 مشاهده مقاله تولید شده (برای بستن کلیک کنید)"):
+                st.write(generated_article)
             st.success("مقاله با موفقیت تولید و ذخیره شد.")
         else:
             st.error("خطا در تولید مقاله")
@@ -418,22 +412,22 @@ def news_details_page():
 
     # Section for images
     st.markdown("### تصاویر")
-    images_df = db_manager.load_images(news_id)
-    if not images_df.empty:
-        for image_url in images_df['image_url']:
-            st.image(image_url, use_column_width=True)
+    images = db_manager.load_images(news_id)
+
+    if images:
+        for img in images:
+            st.image(img, use_column_width=True)
     else:
         st.write("عکسی برای این مقاله یافت نشد.")
     
-    # Button for generating images
     if st.button("تولید تصویر"):
-        # Call GPT to generate image URLs
         img_prompt = summary_api if summary_api else title_api if title_api else content
         generated_images = generate_images_for_dashboard(prompt=img_prompt)
+        
         if generated_images:
-            db_manager.insert_images(news_id, generated_images)
             # for image_url in generated_images:
             #     st.image(image_url, use_column_width=True)
+            db_manager.insert_images(news_id, generated_images)
             st.success("تصاویر با موفقیت تولید و ذخیره شدند.")
             st.experimental_rerun()
         else:
