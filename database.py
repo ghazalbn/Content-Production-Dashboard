@@ -1,483 +1,388 @@
-import streamlit as st
-from datetime import datetime, timedelta
+import pyodbc
+import os
+import logging
+from dotenv import load_dotenv
 import pandas as pd
-import plotly.express as px
-import tldextract
-from database import DatabaseManager
-from bs4 import BeautifulSoup
-import re
-from API_calls import *
+import streamlit as st
+import requests
+from PIL import Image
 import io
 
-# Set page config only once at the start of the script
-st.set_page_config(
-    page_title="News Dashboard",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+load_dotenv()
 
-# Connect to the database
+class DatabaseManager:
+    def __init__(self):
+        self.server = os.getenv("DB_SERVER")
+        self.database = os.getenv("DB_NAME")
+        self.username = os.getenv("DB_USERNAME")
+        self.password = os.getenv("DB_PASSWORD")
+        # self.server = st.secrets.get("DB_SERVER")
+        # self.database = st.secrets.get("DB_NAME")
+        # self.username = st.secrets.get("DB_USERNAME")
+        # self.password = st.secrets.get("DB_PASSWORD")
+        self.conn = None
+        self.cursor = None
+
+    def connect(self):
+        """Establish a connection to the SQL Server database."""
+        try:
+            logging.warning(self.server)
+            logging.warning(f"DRIVER={{ODBC Driver 17 for SQL Server}};" + \
+                f"SERVER={self.server};" + \
+                f"DATABASE={self.database};" + \
+                f"UID={self.username};"+ \
+                f"PWD={self.password}")
+            self.conn = pyodbc.connect(
+                f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+                f"SERVER={self.server};"
+                f"DATABASE={self.database};"
+                f"UID={self.username};"
+                f"PWD={self.password};"
+                f"Timeout=30;"
+            )
+            self.cursor = self.conn.cursor()
+            logging.warning("Database connection established.")
+        except pyodbc.Error as e:
+            logging.error(f"Error connecting to SQL Server: {e}")
+
+    def close(self):
+        """Close the database connection."""
+        if self.conn:
+            self.conn.close()
+            logging.warning("Database connection closed.")
+            
+    def load_content_data(self):
+        """Load all content data from the database."""
+        query = """
+        SELECT id, title, title_persian, date, content, content_persian, url, author, views, source, 
+               summary, summary_persian, final_score, type
+        FROM Content
+        ORDER BY date DESC
+        """
+        try:
+            df = pd.read_sql(query, self.conn)
+            logging.warning("Loaded content data from the database.")
+            return df
+        except pyodbc.Error as e:
+            logging.error(f"Error loading content data: {e}")
+            return pd.DataFrame()
+
+
+    # def load_images(self, news_id):
+    #     """Load images for a given news item (image data stored as binary)."""
+    #     sql = "SELECT image_data FROM ContentImages WHERE content_id = ?"
+    #     try:
+    #         # df = pd.read_sql(query, self.conn, params=[content_id])
+    #         self.cursor.execute(sql, (news_id,))
+    #         rows = self.cursor.fetchall()
+    #         images_df = pd.DataFrame(rows, columns=['image_data'])
+    #         return images_df
+    #     except pyodbc.Error as e:
+    #         logging.error(f"Error loading images: {e}")
+    #         return pd.DataFrame()
+
+
+    def load_images(self, news_id):
+        """Load images for a given news item (image data stored as binary)."""
+        sql = "SELECT image_data FROM ContentImages WHERE content_id = ?"
+        try:
+            self.cursor.execute(sql, (news_id,))
+            rows = self.cursor.fetchall()
+            if rows:
+                # Convert each row's binary image data back into a usable image format
+                images = [Image.open(io.BytesIO(row[0])) for row in rows]
+                return images
+            else:
+                return []
+        except pyodbc.Error as e:
+            logging.error(f"Error loading images: {e}")
+            return []
+
+
+        
+    def load_tags(self, content_id):
+        """Load tags associated with a specific content item."""
+        query = """
+        SELECT t.tag
+        FROM ContentTags ct
+        JOIN Tags t ON ct.tag_id = t.id
+        WHERE ct.content_id = ?
+        """
+        try:
+            df = pd.read_sql(query, self.conn, params=[content_id])
+            logging.warning(f"Loaded tags for content ID {content_id}.")
+            return df
+        except pyodbc.Error as e:
+            logging.error(f"Error loading tags for content ID {content_id}: {e}")
+            return pd.DataFrame()
+        
+    def content_exists(self, url):
+        """Check if a content item already exists in the database by its URL."""
+        self.ensure_connection() 
+        query = "SELECT COUNT(*) FROM Content WHERE url = ?"
+        try:
+            self.cursor.execute(query, (url,))
+            count = self.cursor.fetchone()[0]
+            return count > 0
+        except pyodbc.Error as e:
+            logging.error(f"Error checking if content exists: {e}")
+            return False
+        
+    def alter_tables_for_unicode(self):
+        """Alter tables to ensure they support Unicode characters."""
+        alter_content_table_sql = """
+        IF OBJECT_ID('Content', 'U') IS NOT NULL
+        BEGIN
+            -- Alter columns to NVARCHAR(MAX) for Unicode support
+            IF COL_LENGTH('Content', 'content') IS NOT NULL
+            BEGIN
+                ALTER TABLE Content
+                ALTER COLUMN content NVARCHAR(MAX);
+            END
+
+            IF COL_LENGTH('Content', 'content_persian') IS NOT NULL
+            BEGIN
+                ALTER TABLE Content
+                ALTER COLUMN content_persian NVARCHAR(MAX);
+            END
+
+            IF COL_LENGTH('Content', 'summary') IS NOT NULL
+            BEGIN
+                ALTER TABLE Content
+                ALTER COLUMN summary NVARCHAR(MAX);
+            END
+
+            IF COL_LENGTH('Content', 'summary_persian') IS NOT NULL
+            BEGIN
+                ALTER TABLE Content
+                ALTER COLUMN summary_persian NVARCHAR(MAX);
+            END
+        END
+        """
+
+        try:
+            self.cursor.execute(alter_content_table_sql)
+            self.conn.commit()
+            logging.warning("Tables altered to support Unicode characters.")
+        except pyodbc.Error as e:
+            logging.error(f"Error altering tables: {e}")
+
+    def create_tables(self):
+        """Create necessary tables if they don't exist, or alter them to match the current item structure."""
+        # Create or update Content table
+        create_or_alter_content_table_sql = """
+        IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[Content]') AND type in (N'U'))
+        BEGIN
+            CREATE TABLE Content (
+                id INT IDENTITY(1,1) PRIMARY KEY,
+                title NVARCHAR(255),
+                title_persian NVARCHAR(255),
+                date DATETIME,
+                content NVARCHAR(MAX),           -- Changed from TEXT to NVARCHAR(MAX)
+                content_persian NVARCHAR(MAX),    -- Changed from TEXT to NVARCHAR(MAX)
+                url NVARCHAR(500),
+                author NVARCHAR(255),
+                views INT,
+                source NVARCHAR(255),
+                summary NVARCHAR(MAX),            -- Changed from TEXT to NVARCHAR(MAX)
+                summary_persian NVARCHAR(MAX),    -- Changed from TEXT to NVARCHAR(MAX)
+                final_score FLOAT,
+                type NVARCHAR(100)
+            );
+        END
+        ELSE
+        BEGIN
+            -- Alter table to add new columns if they don't already exist
+            IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[Content]') AND name = 'title_persian')
+                ALTER TABLE Content ADD title_persian NVARCHAR(255);
+            IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[Content]') AND name = 'content_persian')
+                ALTER TABLE Content ADD content_persian TEXT;
+            IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[Content]') AND name = 'summary_persian')
+                ALTER TABLE Content ADD summary_persian TEXT;
+        END
+        """
+
+        create_images_table_sql = """
+        IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[ContentImages]') AND type in (N'U'))
+        BEGIN
+            CREATE TABLE ContentImages (
+                id INT IDENTITY(1,1) PRIMARY KEY,
+                content_id INT,
+                image_url NVARCHAR(500),
+                FOREIGN KEY (content_id) REFERENCES Content(id) ON DELETE CASCADE
+            );
+        END
+        """
+        create_tags_table_sql = """
+        IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[Tags]') AND type in (N'U'))
+        BEGIN
+            CREATE TABLE Tags (
+                id INT IDENTITY(1,1) PRIMARY KEY,
+                tag NVARCHAR(255) UNIQUE
+            );
+        END
+        """
+
+        create_content_tags_table_sql = """
+        IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[ContentTags]') AND type in (N'U'))
+        BEGIN
+            CREATE TABLE ContentTags (
+                content_id INT,
+                tag_id INT,
+                PRIMARY KEY (content_id, tag_id),
+                FOREIGN KEY (content_id) REFERENCES Content(id) ON DELETE CASCADE,
+                FOREIGN KEY (tag_id) REFERENCES Tags(id) ON DELETE CASCADE
+            );
+        END
+        """
+        try:
+            self.cursor.execute(create_or_alter_content_table_sql)
+            self.cursor.execute(create_images_table_sql)
+            self.cursor.execute(create_tags_table_sql)
+            self.cursor.execute(create_content_tags_table_sql)
+            self.alter_tables_for_unicode()
+            self.conn.commit()
+            logging.warning("Tables created or verified successfully.")
+        except pyodbc.Error as e:
+            logging.error(f"Error creating or altering tables: {e}")
+
+
+
+    def ensure_connection(self):
+        """Ensure that the database connection is active, and reconnect if necessary."""
+        try:
+            self.conn.cursor().execute("SELECT 1")
+        except pyodbc.Error:
+            logging.warning("Database connection lost. Reconnecting...")
+            self.connect()
+
+    def insert_content_item(self, item):
+        """Insert a content item into the database and return the inserted row's ID."""
+        self.ensure_connection()  # Ensure connection is active before inserting
+        insert_sql = """
+        INSERT INTO Content (title, title_persian, date, content, content_persian, url, author, views, source, summary, summary_persian, final_score, type)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        values = (
+            item.get('title', ''),
+            item.get('title_persian', ''), 
+            item['date'],
+            item.get('content', ''),
+            item.get('content_persian', ''),
+            item['url'],
+            item['author'],
+            item.get('views', 0),
+            item['source'],
+            item.get('summary', ''),
+            item.get('summary_persian', ''), 
+            item.get('final_score', 0),
+            item.get('type', 'News')
+        )
+        
+        try:
+            self.cursor.execute(insert_sql, values)
+            self.cursor.execute("SELECT @@IDENTITY AS ID")  # Get the newly inserted content ID
+            content_id = self.cursor.fetchone()[0]
+            self.conn.commit()
+
+            logging.warning(f"Inserted content item into database: {item['title']}, ID: {content_id}")
+            
+            # Insert tags and link them to the content
+            if 'tags' in item:
+                tag_ids = self.insert_tags(item['tags'])
+                self.insert_content_tags(content_id, tag_ids)
+
+            return content_id
+        except pyodbc.Error as e:
+            print(item)
+            logging.error(f"Error inserting item into database: {e}")
+            return None
+
+    def download_image_as_binary(self, image_url):
+        try:
+            response = requests.get(image_url)
+            response.raise_for_status()
+            return response.content 
+        except requests.RequestException as e:
+            logging.error(f"Error downloading image: {e}")
+            return None
+
+    def insert_images(self, content_id, images):
+        """Insert multiple images for a given content item, storing the image as binary data."""
+        sql = """
+        INSERT INTO ContentImages (content_id, image_data)
+        VALUES (?, ?)
+        """
+        try:
+            for image_url in images:
+                image_binary = self.download_image_as_binary(image_url)
+                if image_binary:  # Ensure valid binary data is available
+                    self.cursor.execute(sql, (content_id, image_binary))
+            self.conn.commit()
+            logging.warning(f"Inserted {len(images)} images for content item ID {content_id}.")
+        except pyodbc.Error as e:
+            logging.error(f"Error inserting images into the database: {e}")
+
+
+            
+    def insert_translation(self, content_id, translation):
+        """Insert or update the Persian translation for a given content item."""
+        self.ensure_connection()
+
+        update_sql = """
+        UPDATE Content
+        SET content_persian = ?
+        WHERE id = ?
+        """
+        
+        try:
+            self.cursor.execute(update_sql, (translation, content_id))
+            self.conn.commit()
+            logging.warning(f"Inserted/updated Persian translation for content ID {content_id}.")
+        except pyodbc.Error as e:
+            logging.error(f"Error inserting translation for content ID {content_id}: {e}")
+
+       
+            
+    def insert_tags(self, tags):
+        """Insert tags into the Tags table and return their IDs."""
+        tag_ids = []
+        for tag in tags:
+            select_sql = "SELECT id FROM Tags WHERE tag = ?"
+            insert_sql = "INSERT INTO Tags (tag) VALUES (?)"
+
+            try:
+                self.cursor.execute(select_sql, (tag,))
+                row = self.cursor.fetchone()
+
+                if row:
+                    tag_ids.append(row[0])
+                else:
+                    self.cursor.execute(insert_sql, (tag,))
+                    self.cursor.execute("SELECT @@IDENTITY AS ID")
+                    new_tag_id = self.cursor.fetchone()[0]
+                    tag_ids.append(new_tag_id)
+
+            except pyodbc.Error as e:
+                logging.error(f"Error inserting tag '{tag}': {e}")
+        
+        return tag_ids
+    
+    def insert_content_tags(self, content_id, tag_ids):
+        """Link content with tags in the ContentTags table."""
+        insert_sql = "INSERT INTO ContentTags (content_id, tag_id) VALUES (?, ?)"
+        
+        try:
+            for tag_id in tag_ids:
+                self.cursor.execute(insert_sql, (content_id, tag_id))
+            self.conn.commit()
+            logging.warning(f"Linked {len(tag_ids)} tags to content ID {content_id}.")
+        except pyodbc.Error as e:
+            logging.error(f"Error linking tags to content: {e}")
+
+
+
+
 db_manager = DatabaseManager()
 db_manager.connect()
-news_data = db_manager.load_content_data()
-
-# Language selection
-# language = st.sidebar.radio("انتخاب زبان", ("فارسی", "انگلیسی"))
-language = "فارسی"
-
-# Define page names for both languages
-page_names = {
-    "فارسی": ["همه اخبار", "جزئیات خبر", "آمار"],
-}
-
-# Initialize session state for page navigation
-if 'current_page' not in st.session_state:
-    st.session_state['current_page'] = 'همه اخبار'
-    
-
-# Get the current page from session state
-current_page = st.session_state['current_page']
-
-if current_page not in page_names["فارسی"]:
-    current_page = "همه اخبار"  # Reset to default if not found
-
-# Sidebar navigation (always visible)
-page = st.sidebar.selectbox(
-    "رفتن به صفحه" ,
-    page_names[language],
-    index=page_names[language].index(current_page)
-)
-
-# Update session state
-st.session_state['current_page'] = page
-
-# Inject CSS dynamically based on the language selection
-direction = "rtl"
-align = "right"
-
-st.markdown(
-    f"""
-    <style>
-    body {{
-        direction: {direction};
-        text-align: {align};
-        font-family: "IRANSans", sans-serif;
-        background-color: #f5f7fa;
-    }}
-    .css-1d391kg {{  /* Sidebar styling */
-        direction: {direction};
-        text-align: {align};
-    }}
-    .stTitle, .stHeader, .stText {{
-        color: #343a40;
-    }}
-    img {{
-        max-width: 60%; 
-        margin-x:auto
-    }}
-    </style>
-    """,
-    unsafe_allow_html=True
-)
-    # p {{
-    #     text-align:{content_align};
-    #     direction:{content_direction};
-    #     font-family: {content_font_family}
-    # }}
-
-def filter_news(data, title_search='', content_keywords='', sources=None, start_date=None, end_date=None):
-    """Filter news data based on the user's input criteria."""
-    if title_search:
-        data = pd.concat([
-            data[data['title_persian'].str.contains(title_search, case=False, na=False)],
-            data[data['title'].str.contains(title_search, case=False, na=False)]
-        ])
-
-    
-    if content_keywords:
-        # Split keywords by comma, strip whitespaces, and filter
-        keywords = [kw.strip() for kw in content_keywords.split(',')]
-        if keywords:
-            keyword_pattern = '|'.join(keywords)  # Create regex pattern with OR between keywords
-            data = pd.concat([
-                data[data['content_persian'].str.contains(keyword_pattern, case=False, na=False)],
-                data[data['content'].str.contains(keyword_pattern, case=False, na=False)]
-            ])
-
-    
-    if sources and "همه" not in sources:
-        # If specific sources are selected, filter by those sources
-        data = data[data['source'].isin(sources)]
-    
-    if start_date and end_date:
-        start_date = pd.to_datetime(start_date)
-        end_date = pd.to_datetime(end_date)
-        data = data[(data['date'] >= start_date) & (data['date'] <= end_date)]
-    
-    return data
-
-def extract_domain(url):
-    """Extract domain from the URL."""
-    domain = tldextract.extract(url).registered_domain
-    return domain
-
-def render_content(content, language='fa'):
-    if 'language_option' not in st.session_state:
-        st.session_state['language_option'] = 'انگلیسی'
-        
-    language_option = st.session_state['language_option']
-
-    if language_option == "انگلیسی": 
-        content_direction = "ltr"
-        content_align = "left"
-        content_font_family = '"Arial", sans-serif'
-    else:
-        content_direction = "rtl"
-        content_align = "right"
-        content_font_family = '"IRANSans", sans-serif'
-        
-    def render_html(soup):
-        for element in soup.children:
-            if element.name == 'p':
-                text = element.get_text()
-                # Apply CSS directly to each <p> tag
-                st.markdown(
-                    f"""
-                    <p style="direction: {content_direction}; text-align: {content_align}; font-family: {content_font_family};">
-                    {text}
-                    </p>
-                    """, 
-                    unsafe_allow_html=True
-                )
-            elif element.name == 'img':
-                image_url = element.get('src')
-                image_alt = element.get('alt')
-                # Apply styles to images
-                image_style = f"direction: {content_direction}; text-align: {content_align}; font-family: {content_font_family};"
-                
-                if image_url.endswith('.svg'):
-                    # Display the SVG icon with the text side by side
-                    st.markdown(
-                        f"""
-                        <div style="{image_style}; display: inline-flex; align-items: center;">
-                            <img src="{image_url}" width="25px" alt="{image_alt}" style="margin-right: 10px;"/>
-                            <span>{image_alt}</span>
-                        </div>
-                        """, 
-                        unsafe_allow_html=True
-                    )
-                else:
-                    # For non-SVG images, style as before
-                    st.markdown(
-                        f"""
-                        <div style="{image_style}">
-                            <img src="{image_url}" style="width: 1000px;"/>
-                        </div>
-                        """,
-                        unsafe_allow_html=True
-                    )
-            elif element.name == 'ul':
-                for li in element.find_all('li'):
-                    st.markdown(f"- {li.get_text()}", unsafe_allow_html=True)
-            elif element.name == 'blockquote':
-                st.markdown(f"> {element.get_text()}", unsafe_allow_html=True)
-
-    # Call render_html with your styles
-    soup = BeautifulSoup(content, 'html.parser')
-    render_html(soup)
-
-
-
-def keyword_weight_input():
-    keyword_weight_pairs = []
-    st.sidebar.markdown("### فیلتر با کلمات کلیدی و وزن‌ها")
-    number_of_keywords = st.sidebar.number_input("تعداد کلمات کلیدی", min_value=1, max_value=10, value=1)
-    for i in range(int(number_of_keywords)):
-        keyword = st.sidebar.text_input(f"کلمه کلیدی {i+1}")
-        weight = st.sidebar.number_input(f"وزن {i+1} (حداقل دفعات مشاهده)", min_value=1, max_value=10, value=1)
-        keyword_weight_pairs.append((keyword, weight))
-    return keyword_weight_pairs
-
-def clean_content(content):
-    # Remove HTML tags
-    soup = BeautifulSoup(content, 'html.parser')
-    text = soup.get_text()
-
-    # Remove extra spaces and newlines
-    text = re.sub(r'\s+', ' ', text).strip()
-
-    return text
-
-def filter_by_keywords(news_data, keyword_weight_pairs):
-    news_data['matched_keywords'] = None  # Add a column to store matched keywords
-
-    for index, row in news_data.iterrows():
-        content_cleaned = clean_content(row['content'])
-        matched_keywords = []
-
-        # Check if each keyword exists in the content with at least the specified weight
-        for keyword, weight in keyword_weight_pairs:
-            count = content_cleaned.lower().count(keyword.lower())
-            if count >= weight:
-                matched_keywords.append(keyword)
-
-        # If at least one keyword matches the criteria, update the 'matched_keywords' column
-        if matched_keywords:
-            news_data.at[index, 'matched_keywords'] = matched_keywords
-
-    # Return the modified news_data
-    return news_data.dropna(subset=['matched_keywords'])
-
-
-
-    
-def all_news_page():
-    st.title("📋 همه اخبار")
-
-    # Filtering options
-    st.sidebar.header("🔍 فیلتر کردن اخبار")
-    title_search = st.sidebar.text_input("جستجو در عنوان")
-
-    # Use the keyword_weight_input function for keyword-weight pair input
-    content_keywords = keyword_weight_input()
-
-    # Filtering other options
-    unique_sources = news_data['source'].dropna().unique()
-    unique_sources = sorted(unique_sources)
-    unique_sources.insert(0, "همه")
-
-    news_data['domain'] = news_data['url'].apply(extract_domain)
-    unique_domains = news_data['domain'].dropna().unique()
-    unique_domains = sorted(unique_domains)
-    unique_domains.insert(0, "همه")
-
-    unique_types = news_data['type'].dropna().unique()
-    unique_types = sorted(unique_types)
-    unique_types.insert(0, "همه")
-
-    # Multi-select for sources
-    source_filter = st.sidebar.multiselect("فیلتر بر اساس منبع", unique_sources, default=["همه"])
-
-    domain_filter = st.sidebar.selectbox("فیلتر بر اساس وب‌سایت", unique_domains)
-    type_filter = st.sidebar.selectbox("فیلتر بر اساس نوع خبر", unique_types)
-
-    start_date = st.sidebar.date_input("تاریخ شروع", value=datetime.now() - timedelta(days=7))
-    end_date = st.sidebar.date_input("تاریخ پایان", value=datetime.now())
-
-    sort_by = st.sidebar.selectbox("مرتب‌سازی بر اساس", 
-                                   ["تاریخ", "عنوان", "منبع", "امتیاز نهایی"])
-    sort_order = st.sidebar.radio("ترتیب مرتب‌سازی", ["نزولی", "صعودی"])
-
-    # Apply filtering by keywords and other criteria
-    filtered_data = filter_by_keywords(news_data, content_keywords)
-
-    filtered_data = filter_news(
-        filtered_data,
-        title_search,
-        None,
-        source_filter if "همه" not in source_filter else None,
-        start_date,
-        end_date
-    )
-    
-    if domain_filter != "همه":
-        filtered_data = filtered_data[filtered_data['domain'] == domain_filter]
-
-    if type_filter != "همه":
-        filtered_data = filtered_data[filtered_data['type'] == type_filter]
-
-    sort_map = {'تاریخ': 'date', 'عنوان': 'title_persian', 'منبع': 'source', 'امتیاز نهایی': 'final_score'}
-    filtered_data = filtered_data.sort_values(by=sort_map[sort_by], ascending=(sort_order == "صعودی"))
-
-    # Display filtered news articles
-    for index, row in filtered_data.iterrows():
-        with st.expander(f"### {row['title_persian']}" if row['title_persian'] and language == "فارسی" else f"### {row['title']}"):
-            st.markdown(f"**تاریخ**: {row['date']} | **منبع**: {row['source']} | **وب‌سایت**: {row['domain']} | **بازدیدها**: {row['views']}")
-            st.markdown(f"**خلاصه**: {row['summary_persian'][:200] if row['summary_persian'] and language == 'فارسی' else row['summary'][:200]}...")
-
-            if row['matched_keywords']:
-                st.markdown(f"**کلمات کلیدی مطابق**: {', '.join(row['matched_keywords'])}")
-
-            if st.button("مشاهده جزئیات", key=f"btn_{index}"):
-                st.session_state['selected_news_id'] = row['id']
-                st.session_state['current_page'] = 'جزئیات خبر'
-                st.experimental_rerun()
-
-
-
-
-def news_details_page():
-    if 'selected_news_id' not in st.session_state:
-        st.warning("لطفا یک خبر را از صفحه همه اخبار انتخاب کنید.")
-        return
-
-    news_id = st.session_state['selected_news_id']
-    selected_news = news_data[news_data['id'] == news_id].iloc[0]
-
-    # Set default language
-    if 'language' not in st.session_state:
-        st.session_state['language'] = "فارسی"  
-
-    language = st.session_state['language']
-
-    # Set fields based on selected language
-    title = selected_news['title_persian'] if selected_news['title_persian'] and language == "فارسی" else selected_news['title']
-    summary = selected_news['summary_persian'] if selected_news['summary_persian'] and language == "فارسی" else selected_news['summary']
-    content = selected_news['content'] if selected_news['content'] or language == "English" else selected_news['content_persian']
-    matched_keywords = selected_news.get('matched_keywords', [])
-    title_api = selected_news['title_persian'] if selected_news['title'] else selected_news['title_persian']
-    summary_api = selected_news['summary'] if selected_news['summary'] else selected_news['summary_persian']
-
-    st.title(title)
-    st.write(f"**تاریخ**: {selected_news['date']}")
-    st.write(f"**منبع**: {selected_news['source']}")
-    st.write(f"**وب‌سایت**: {extract_domain(selected_news['url'])}")
-    st.write(f"**نویسنده**: {selected_news['author']}")
-    st.write(f"**بازدیدها**: {selected_news['views']}")
-    st.write(f"**امتیاز نهایی**: {selected_news['final_score']}")
-    st.write(f"**نوع خبر**: {selected_news['type']}")
-
-    # Display radio buttons for content language selection
-    st.markdown("### انتخاب زبان محتوا")
-    language_option = st.radio("نمایش محتوا به:", ["انگلیسی", "فارسی"])
-    st.session_state['language_option'] = language_option
-
-    # Display English content if selected
-    if language_option == "انگلیسی":
-        st.markdown("### محتوا (انگلیسی)")
-        render_content(content, language='en') 
-
-    # If Persian is selected, check if Persian content exists, otherwise prompt for translation
-    if language_option == "فارسی":
-        st.markdown("### محتوا (فارسی)")
-        
-        if selected_news['content_persian']:
-            # Display existing Persian content
-            render_content(selected_news['content_persian'])
-        else:
-            # Inform the user that no Persian content exists and prompt for translation
-            st.write("محتوای فارسی موجود نیست. لطفا ترجمه کنید.")
-            
-        translation = ''
-        # Step 2: Translation buttons
-        if st.button("ترجمه با گوگل"):
-            # Perform translation using Googletrans
-            translation = translate_for_dashboard(content, 'en', 'fa', False)
-            if translation:
-                db_manager.insert_translation(news_id, translation)
-                st.success("ترجمه با موفقیت انجام شد.")
-            else:
-                st.error("خطا در ترجمه جدید")
-
-        elif st.button("ترجمه با GPT"):
-            # Perform translation using GPT
-            translation = translate_for_dashboard(content, 'en', 'fa', True)
-            if translation:
-                db_manager.insert_translation(news_id, translation)
-                st.success("ترجمه با موفقیت انجام شد.")
-            else:
-                st.error("مشکلی در ارتباط با API رخ داد.")
-        
-        if translation:
-            st.experimental_rerun()
-
-    
-    # Display summary
-    st.markdown("### خلاصه")
-    if summary:
-        st.write(summary)
-    else:
-        st.write("خلاصه ای برای این مقاله یافت نشد.")
-    
-    st.markdown("### مقاله")
-    if st.button("📝 تولید مقاله از این خبر"):
-        generated_article = generate_article_for_dashboard(
-            title_api, 
-            selected_news['source'], 
-            selected_news['url'], 
-            selected_news['date'], 
-            content,
-            matched_keywords=matched_keywords
-        )
-
-        if generated_article and generated_article != "No Article":
-            with st.expander("🔍 مشاهده مقاله تولید شده (برای بستن کلیک کنید)"):
-                st.write(generated_article)
-            st.success("مقاله با موفقیت تولید و ذخیره شد.")
-        else:
-            st.error("خطا در تولید مقاله")
-
-    st.markdown("### لینک اصلی")
-    st.write(selected_news['url'])
-
-    # Section for images
-    st.markdown("### تصاویر")
-    images = db_manager.load_images(news_id)
-
-    if images:
-        for img in images:
-            st.image(img, use_column_width=True)
-    else:
-        st.write("عکسی برای این مقاله یافت نشد.")
-    
-    if st.button("تولید تصویر"):
-        img_prompt = summary_api if summary_api else title_api if title_api else content
-        generated_images = generate_images_for_dashboard(prompt=img_prompt)
-        
-        if generated_images:
-            # for image_url in generated_images:
-            #     st.image(image_url, use_column_width=True)
-            db_manager.insert_images(news_id, generated_images)
-            st.success("تصاویر با موفقیت تولید و ذخیره شدند.")
-            st.experimental_rerun()
-        else:
-            st.error("مشکلی در ارتباط با API رخ داد.")
-
-    # Section for tags
-    st.markdown("### برچسب‌ها")
-    tags_df = db_manager.load_tags(news_id)
-    if not tags_df.empty:
-        st.write(' ,'.join(tags_df['tag']))
-    else:
-        st.write("برچسب‌ها در حال حاضر موجود نیستند.")
-    if len(tags_df) < 7:
-        if st.button("تولید تگ"):
-
-            generated_tags = generate_tags_for_dashboard(content, selected_news.get('tags', []))
-            if generated_tags:
-                db_manager.insert_content_tags(news_id, generated_tags)
-                st.success("تولید تگ با موفقیت انجام شد.")
-                st.experimental_rerun()
-            else:
-                st.error("مشکلی در ارتباط با API رخ داد.")
-
-
-
-def statistics_page():
-    st.title("آمار اخبار")
-
-    last_week_data = news_data[news_data['date'] >= (datetime.now() - timedelta(days=7))]
-
-    # Number of news from each source in the last week
-    source_count = last_week_data['source'].value_counts().reset_index()
-    source_count.columns = ['منبع', 'تعداد اخبار']
-    fig1 = px.bar(source_count, x='منبع', y='تعداد اخبار', title="تعداد اخبار از هر منبع (هفته گذشته)", color='منبع', template='plotly_dark')
-    st.plotly_chart(fig1, use_container_width=True)
-
-    # Number of news per day
-    daily_count = news_data['date'].dt.date.value_counts().reset_index()
-    daily_count.columns = ['تاریخ', 'تعداد اخبار']
-    daily_count = daily_count.sort_values(by='تاریخ')
-    fig2 = px.line(daily_count, x='تاریخ', y='تعداد اخبار', title="تعداد اخبار در هر روز", markers=True, template='plotly_dark')
-    st.plotly_chart(fig2, use_container_width=True)
-    
-    
-
-if st.session_state['current_page'] == ("همه اخبار"):
-    all_news_page()
-elif st.session_state['current_page'] == ("جزئیات خبر"):
-    news_details_page()
-elif st.session_state['current_page'] == ("آمار"):
-    statistics_page()
-# Close the database connection
-# db_manager.close()
+db_manager.create_tables()
